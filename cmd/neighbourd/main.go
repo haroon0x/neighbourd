@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"github.com/haroon0x/neighbourd/internal/client"
 	"github.com/haroon0x/neighbourd/internal/discovery"
 	"github.com/haroon0x/neighbourd/internal/identity"
+	"github.com/haroon0x/neighbourd/internal/mcp"
 	"github.com/haroon0x/neighbourd/internal/pair"
 	"github.com/haroon0x/neighbourd/internal/proto"
 	"github.com/haroon0x/neighbourd/internal/server"
@@ -28,7 +30,7 @@ import (
 )
 
 const (
-	version     = "0.2.0"
+	version     = "0.3.0"
 	defaultPort = 7717
 )
 
@@ -40,12 +42,16 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "up":
+		err = runServe(append([]string{"--pair"}, os.Args[2:]...))
 	case "serve":
 		err = runServe(os.Args[2:])
 	case "peers":
 		err = runPeers(os.Args[2:])
 	case "pair":
 		err = runPair(os.Args[2:])
+	case "mcp":
+		err = runMCP(os.Args[2:])
 	case "status":
 		err = runStatus(os.Args[2:])
 	case "trust":
@@ -69,21 +75,28 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `neighbourd — agents on your LAN, meeting without a broker
 
-  neighbourd serve [--pair] [--name NAME] [--port PORT] [--bind ADDR]
-      Announce this machine, serve its card, and accept pairing requests
-      while a pairing window is open. Send SIGHUP for a new code.
+  neighbourd up [--name NAME] [--port PORT]
+      Go online and open a pairing window. The one command to run on a machine
+      that should be reachable. Send SIGHUP for a new code.
+
+  neighbourd mcp [--print-config] [--allow PATH ...]
+      MCP server on stdio, so an agent can call paired peers as tools.
+      --print-config writes the client config block pointing at this binary.
+
+  neighbourd pair [<host:port>] [--code CODE]
+      With no arguments, list the machines on the network and pair interactively.
 
   neighbourd peers [--wait DURATION]
-      Browse the local network and print every node that answered.
-
-  neighbourd pair <host:port> --code CODE
-      Redeem a pairing code shown by another node.
+      Browse the network and print every node that answered.
 
   neighbourd status <id|name>
       Make a signed request to a paired peer and print its answer.
 
   neighbourd trust [list|remove <id>]
       Show or revoke paired peers.
+
+  neighbourd serve [--pair] [--name NAME] [--port PORT] [--bind ADDR] [--no-mdns]
+      Same as up, with every option explicit.
 
   neighbourd version
       Print the version.
@@ -241,23 +254,15 @@ func printPairing(window *pair.Window, baseURL, freshCode string) {
 
 func runPair(args []string) error {
 	fs := flag.NewFlagSet("pair", flag.ExitOnError)
-	code := fs.String("code", "", "pairing code shown on the other machine")
+	codeFlag := fs.String("code", "", "pairing code shown on the other machine")
 	if err := parseInterspersed(fs, args, "code"); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return errors.New("usage: neighbourd pair <host:port> --code CODE")
-	}
-	if *code == "" {
-		return errors.New("--code is required; it is printed by `neighbourd serve --pair` on the other machine")
+	if fs.NArg() > 1 {
+		return errors.New("usage: neighbourd pair [<host:port>] [--code CODE]")
 	}
 
-	target, err := normalizeURL(fs.Arg(0))
-	if err != nil {
-		return err
-	}
-
-	id, err := identity.LoadOrCreate("")
+	me, err := identity.LoadOrCreate("")
 	if err != nil {
 		return err
 	}
@@ -270,11 +275,30 @@ func runPair(args []string) error {
 		return err
 	}
 
+	// No target given: find the machines and ask. Remembering an address off the
+	// other screen is the step where setup stops being convenient.
+	code := *codeFlag
+	target := fs.Arg(0)
+	if target == "" {
+		target, code, err = choosePeer(peers, me)
+		if err != nil {
+			return err
+		}
+	}
+	if code == "" {
+		return errors.New("a pairing code is required; it is printed by `neighbourd up` on the other machine")
+	}
+
+	baseURL, err := normalizeURL(target)
+	if err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	c := client.New(id)
-	peer, err := c.Pair(ctx, target, *code)
+	c := client.New(me)
+	peer, err := c.Pair(ctx, baseURL, code)
 	if err != nil {
 		return err
 	}
@@ -292,7 +316,200 @@ func runPair(args []string) error {
 	fmt.Printf("paired with %s (%s)\n", peer.Name, shortID(peer.ID))
 	fmt.Printf("  address %s\n", peer.BaseURL)
 	fmt.Printf("  reply   %s\n", strings.TrimSpace(string(body)))
-	fmt.Printf("  stored  %s/peers.json\n", storeDir)
+	if peer.ID != "" {
+		fmt.Printf("  now     neighbourd status %s\n", shortID(peer.ID))
+	}
+	return nil
+}
+
+// choosePeer lists the nodes on the network that are worth pairing with, then
+// reads a choice and the code from stdin. When stdin is a pipe it behaves the
+// same way, which is what the tests use.
+func choosePeer(peers *trust.Store, me *identity.Identity) (target, code string, err error) {
+	fmt.Print("looking for neighbours … ")
+	found, browseErr := discovery.Browse(context.Background(), 3*time.Second)
+	if browseErr != nil {
+		fmt.Printf("failed: %v\n", browseErr)
+	} else {
+		fmt.Printf("%d found\n\n", len(found))
+	}
+
+	candidates := make([]discovery.Peer, 0, len(found))
+	for _, p := range found {
+		if p.ID == me.ID {
+			continue // that is us
+		}
+		if rec, ok := peers.Get(p.ID); ok && rec.TokenToPeer != "" {
+			continue // already paired; nothing to do
+		}
+		candidates = append(candidates, p)
+	}
+
+	if len(candidates) == 0 {
+		return "", "", errors.New("nothing to pair with on this network.\n" +
+			"check: the other machine is running `neighbourd up`, both are on the same Wi-Fi, and the router is not isolating clients.\n" +
+			"or pair by address: neighbourd pair <host:port> --code CODE")
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	for i, p := range candidates {
+		addr := net.JoinHostPort(p.Addr, fmt.Sprint(p.Port))
+		fmt.Fprintf(w, "  %d) %s	%s	%s\n", i+1, p.Name, addr, shortID(p.ID))
+	}
+	w.Flush()
+	fmt.Print("\nwhich one? [1]: ")
+
+	in := bufio.NewReader(os.Stdin)
+	line, err := in.ReadString('\n')
+	if err != nil && line == "" {
+		return "", "", fmt.Errorf("read choice: %w", err)
+	}
+	line = strings.TrimSpace(line)
+
+	chosen := candidates[0]
+	switch {
+	case line == "":
+		// keep the default
+	case line == strings.TrimSpace(line) && isIndex(line, len(candidates)):
+		chosen = candidates[atoi(line)-1]
+	default:
+		// Treat anything else as an address, so the prompt doubles as a
+		// shortcut for a node that mDNS did not surface.
+		fmt.Print("pairing code on " + line + ": ")
+		code, err = readLine(in)
+		return line, code, err
+	}
+
+	fmt.Printf("pairing code on %s: ", chosen.Name)
+	code, err = readLine(in)
+	return net.JoinHostPort(chosen.Addr, fmt.Sprint(chosen.Port)), code, err
+}
+
+func readLine(in *bufio.Reader) (string, error) {
+	line, err := in.ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("read input: %w", err)
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func isIndex(s string, hi int) bool {
+	n := atoi(s)
+	return n >= 1 && n <= hi
+}
+
+func atoi(s string) int {
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
+func runMCP(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	printConfig := fs.Bool("print-config", false, "print an MCP client config block and exit")
+	var extra multiFlag
+	fs.Var(&extra, "allow", "additional path call_peer may request (repeatable)")
+	if err := parseInterspersed(fs, args, "allow"); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return errors.New("usage: neighbourd mcp [--print-config] [--allow PATH]")
+	}
+
+	me, err := identity.LoadOrCreate("")
+	if err != nil {
+		return err
+	}
+
+	if *printConfig {
+		return printMCPConfig()
+	}
+
+	storeDir, err := identity.Dir()
+	if err != nil {
+		return err
+	}
+	peers, err := trust.Open(storeDir)
+	if err != nil {
+		return err
+	}
+
+	srv := mcp.New(mcp.Options{
+		ID:      me,
+		Trust:   peers,
+		Version: version,
+		Browse: func(wait time.Duration) []discovery.Peer {
+			ctx, cancel := context.WithTimeout(context.Background(), wait+time.Second)
+			defer cancel()
+			found, err := discovery.Browse(ctx, wait)
+			if err != nil {
+				return nil
+			}
+			return found
+		},
+		Allow: append(append([]string{}, mcp.DefaultAllowlist...), extra...),
+		In:    os.Stdin,
+		Out:   os.Stdout,
+		Log:   os.Stderr,
+	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if len(peers.List()) == 0 {
+		fmt.Fprintln(os.Stderr, "neighbourd: no paired peers yet; the agent can still list the network. Pair with: neighbourd pair")
+	}
+	return srv.Run(ctx)
+}
+
+// printMCPConfig emits the block a client needs, pointing at this exact binary.
+// Guessing the path is the difference between "one line to paste" and "read the
+// docs to find out what to write".
+func printMCPConfig() error {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "neighbourd"
+	}
+	storeDir, _ := identity.Dir()
+	paired := 0
+	if peers, err := trust.Open(storeDir); err == nil {
+		for _, p := range peers.List() {
+			if p.TokenToPeer != "" {
+				paired++
+			}
+		}
+	}
+
+	block := map[string]any{
+		"mcpServers": map[string]any{
+			"neighbourd": map[string]any{
+				"command": exe,
+				"args":    []string{"mcp"},
+			},
+		},
+	}
+	raw, _ := json.MarshalIndent(block, "", "  ")
+	fmt.Println(string(raw))
+	fmt.Fprintln(os.Stderr, "\nPaste this into your MCP client config (Hermes: mcp_servers in config.yaml).")
+	if paired == 0 {
+		fmt.Fprintln(os.Stderr, "No peers paired yet. On the other machine run `neighbourd up`, then run `neighbourd pair` here.")
+	} else {
+		fmt.Fprintf(os.Stderr, "%d peer(s) ready to call.\n", paired)
+	}
+	return nil
+}
+
+// multiFlag collects a repeatable string flag.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
 	return nil
 }
 

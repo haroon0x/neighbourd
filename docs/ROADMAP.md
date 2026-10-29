@@ -25,15 +25,14 @@ Ordered by what unblocks the next thing, not by what is fun to write.
 - [x] store safe against two processes sharing one file
 - [x] golden tests for the canonical signing forms
 
-## v0.3 — MCP adapter
+## v0.3 — MCP adapter (done)
 
-- [ ] `neighbourd mcp` — stdio MCP server exposing `list_peers`, `peer_card`,
-      `call_peer`
-- [ ] peer selection by id, never by name
-- [ ] per-peer tool allowlist so a remote agent cannot call everything
-
-This is the version that makes it useful to an MCP client with no configuration
-step, which is the whole point of the project.
+- [x] `neighbourd mcp` — stdio MCP server exposing `list_peers`, `peer_card`,
+      `call_peer`, `my_identity`
+- [x] `mcp --print-config` emits the client block with the absolute binary path
+- [x] peer selection by id, falling back to an unambiguous name
+- [x] per-path allowlist for `call_peer`, defaults to the three read endpoints
+- [x] `up` and interactive `pair` so setup is three commands, not five
 
 ## v0.4 — A2A conformance and TLS
 

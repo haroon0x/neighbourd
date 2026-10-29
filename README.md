@@ -2,75 +2,111 @@
 
 Agents on your LAN, meeting without a broker.
 
-Two machines on the same Wi-Fi cannot find each other without being told where
-to look. Agent frameworks assume one of two things: the other agent has a public
-URL, or a human pasted a host and port into a config file. On a home network
-neither is true.
+Two machines on the same Wi-Fi cannot find each other without being told where to
+look. Agent frameworks assume the other agent has a public URL, or that a human
+pasted a host and port into a config file. On a home network neither is true.
 
-`neighbourd` makes local agents discoverable and then lets them authenticate
-each other. Start it on each machine: it announces itself over mDNS, serves an
-agent card, and pairs with a one-time code. After pairing, every request carries
-a token **and** a signature from that machine's key, so a stolen token is not
-enough to impersonate anyone.
+`neighbourd` is a single binary that fixes that in three commands. Start it on
+each machine and it announces itself over mDNS, serves an agent card, and opens a
+pairing window. Pair once with an 8-character code. Point your agent at it as an
+MCP server, and from then on the agent can call the other machine as a tool — no
+URL, no port, no config file to memorise.
 
-No cloud, no broker, no port forwarding.
+After pairing, every request carries a token **and** an Ed25519 signature from
+that machine's key, so a stolen token file is not enough to impersonate anyone.
 
-The name is the thing it does: a daemon that knows its neighbours. Neighbours
-talk because they are near each other, not because a server introduced them.
+## Setup
 
-## What works today (v0.2)
+Three commands per machine. Build or install first:
+
+```sh
+go build -o neighbourd ./cmd/neighbourd     # or: go install github.com/haroon0x/neighbourd/cmd/neighbourd@latest
+```
+
+**1. On the machine that should accept the pairing:**
+
+```sh
+$ ./neighbourd up --name desktop
+neighbourd 0.3.0
+  name    desktop
+  id      9057a697f366b94868e15e7e08eae73c
+  card    http://192.168.29.93:7717/.well-known/agent-card.json
+  mdns    desktop._neighbourd._tcp.local
+  paired  0
+
+pairing open until 10:59:05
+  code    7HAYUNW5
+  then    neighbourd pair 192.168.29.93:7717 --code 7HAYUNW5
+```
+
+`up` is the whole thing: announce, serve, and wait for a pairing. `SIGHUP` gives
+a new code; codes expire after five minutes and work once.
+
+**2. On the other machine, with no arguments:**
+
+```sh
+$ ./neighbourd pair
+looking for neighbours … 1 found
+
+  1) desktop  192.168.29.93:7717  9057a697
+
+which one? [1]: 1
+pairing code on desktop: 7HAYUNW5
+paired with desktop (9057a697)
+  address http://192.168.29.93:7717
+  reply   {"id":"9057a697...","name":"desktop","operator":false,...}
+  now     neighbourd status 9057a697
+```
+
+It finds the nodes itself, so nothing needs copying except the code. Pairing is
+directional: run it on both machines, each with its own code, if both should be
+able to call the other.
+
+**3. Wire your agent to it:**
+
+```sh
+$ ./neighbourd mcp --print-config
+{
+  "mcpServers": {
+    "neighbourd": {
+      "command": "/home/you/go/bin/neighbourd",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Paste that into your client's MCP config and restart it. The path is this exact
+binary, so there is nothing to edit. See [docs/MCP.md](docs/MCP.md) for what the
+tools do.
+
+## The MCP tools
+
+| tool          | what it does                                                        |
+|---------------|---------------------------------------------------------------------|
+| `list_peers`  | who is on this network and which of them you can call               |
+| `peer_card`   | fetch a peer's agent card (public, unverified)                       |
+| `call_peer`   | make a signed request to a paired peer, allowlisted paths only       |
+| `my_identity` | this machine's id and name, which the other side needs to pair      |
+
+`call_peer` accepts `/v1/ping`, `/v1/identity` and `/v1/peers` by default.
+Anything else needs `--allow /path` when starting `neighbourd mcp`: an agent with
+a valid signature on every machine it can reach is not a default worth shipping.
+
+## What works today (v0.3)
 
 - persistent identity per machine: Ed25519 keypair, id = first 16 bytes of the
-  key's sha256, stored in `~/.config/neighbourd/identity.json`
-- announces `_neighbourd._tcp` over mDNS; `neighbourd peers` prints who answered
-- serves `/.well-known/agent-card.json` in the A2A agent-card shape
-- one-time pairing codes: 8 characters, single use, 5 minute window, `SIGHUP`
-  for a new one
-- per-peer tokens plus Ed25519 request signatures, replay protection by nonce,
-  clock-skew rejection with a readable error
-- `neighbourd trust` lists, and revokes, paired peers
+  key's sha256, in `~/.config/neighbourd/identity.json`
+- announces `_neighbourd._tcp` over mDNS; container bridges filtered out
+- agent card at `/.well-known/agent-card.json`, A2A-shaped
+- one-time pairing codes, single use, 5 minute window
+- per-peer tokens plus Ed25519 request signatures, nonce replay protection,
+  clock skew rejection that names the offset
+- MCP server over stdio: peers as tools, no new dependency
+- `trust list` / `trust remove`, revocation in both directions
 
-Not built yet: A2A message transport, the MCP adapter, file transfer. See
-[docs/ROADMAP.md](docs/ROADMAP.md).
-
-## Try it
-
-```sh
-go build -o neighbourd ./cmd/neighbourd
-```
-
-On the machine that should accept the pairing:
-
-```sh
-$ ./neighbourd serve --name laptop --pair
-neighbourd 0.2.0
-  name    laptop
-  id      18543c1ba8d88db412a420bbd247be09
-  card    http://192.168.29.93:7717/.well-known/agent-card.json
-  mdns    laptop._neighbourd._tcp.local
-
-pairing open until 10:42:45
-  code    TTUP8WBM
-  then    neighbourd pair 192.168.29.93:7717 --code TTUP8WBM
-```
-
-On the other machine, run the line it printed:
-
-```sh
-$ ./neighbourd pair 192.168.29.93:7717 --code TTUP8WBM
-paired with laptop (18543c1b)
-  address http://192.168.29.93:7717
-  reply   {"id":"18543c1b...","name":"laptop","operator":false,...}
-```
-
-Then either side can call the other:
-
-```sh
-$ ./neighbourd status laptop
-```
-
-Pairing is directional. To let each machine call the other, pair twice — once in
-each direction, each with its own code.
+Not built yet: A2A message transport, TLS, file transfer. See
+[docs/ROADMAP.md](docs/ROADMAP.md), and the issue list for what is next.
 
 ## Why the signature matters
 
@@ -86,25 +122,15 @@ X-Neighbourd-Nonce: <32 hex chars, unique per request>
 X-Neighbourd-Sig: base64(ed25519 over a canonical form of the request)
 ```
 
-Holding the token gets a caller past the first check and no further. Without the
-private key, the signature does not verify. [docs/PROTOCOL.md](docs/PROTOCOL.md)
-has the exact bytes signed.
-
-## Design in one paragraph
-
-mDNS gives discovery and nothing else: anyone on the network can read the
-announcement and answer it, so discovery is not authentication. `neighbourd`
-treats the LAN as a place, not a trust boundary. The announcement is public by
-design, the card is public, and everything that returns data needs a token plus
-a signature from a pinned key. [docs/DESIGN.md](docs/DESIGN.md) has the threat
-model, including what this deliberately does not defend.
+Holding the token gets a caller past the first check and no further.
+[docs/PROTOCOL.md](docs/PROTOCOL.md) has the exact bytes signed.
 
 ## What it isn't
 
 - not a file transfer tool — LocalSend, Syncthing and croc already do that well;
   this should call them, not replace them
-- not a tunnel — nothing here is reachable from outside your network, and that
-  is a constraint, not a missing feature
+- not a tunnel — nothing here is reachable from outside your network, and that is
+  a constraint, not a missing feature
 - not a mesh or a VPN
 - not an LLM runtime
 - not a replacement for A2A or MCP — it is the discovery and pairing layer both
@@ -117,22 +143,20 @@ card), but assumes you already know the other agent's URL.
 **LAD-A2A** (draft 0.2) standardises the missing piece: finding A2A agents with
 mDNS and bootstrapping trust on a local network. `neighbourd` implements towards
 that spec; where it deviates, DESIGN.md says why.
-**MCP** is the tool-call protocol. The planned adapter exposes discovered peers
-as MCP tools so an MCP client can call a remote agent it was never configured
-with.
+**MCP** is the tool-call protocol, and this is now an MCP server, so an existing
+agent gets the network for free.
 **supergateway** puts a stdio MCP server on a network. That is transport. This is
-discovery and identity.
+discovery, identity and pairing.
 
 ## Status
 
-Early, and honest about it. v0.2 does discovery, pairing, signed requests and
-revocation. Interfaces will move. Issues and arguments about the design are
-welcome.
+Early and honest about it. Interfaces will move. Issues and arguments about the
+design are welcome.
 
 ## Requirements
 
-Go 1.25 or newer. Linux and macOS tested. Windows should work but needs a
-working mDNS responder (Bonjour, or the one in Windows 10+).
+Go 1.25 or newer to build. Linux and macOS tested. Windows should work but needs
+a working mDNS responder (Bonjour, or the one in Windows 10+).
 
 ## License
 

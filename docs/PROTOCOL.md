@@ -150,6 +150,7 @@ one in each direction, and a node keeps both tokens for the same peer id.
 
 ## Versioning
 
-`protocol` is compared as an exact string. A future minor revision keeps this
-document's shape and bumps the id; peers that do not match are refused at pairing
-rather than half-working.
+`protocol` is compared as an exact string. It tracks the wire format, not the
+software version: v0.3.0 of this program still speaks `neighbourd/0.2` because no
+message changed shape. A future revision that does change one bumps the id, and
+peers that do not match are refused at pairing rather than half-working.

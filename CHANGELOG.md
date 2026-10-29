@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.0
+
+An MCP server, and a setup that fits in three commands.
+
+- Added: `neighbourd mcp`, a Model Context Protocol server on stdio exposing
+  `list_peers`, `peer_card`, `call_peer` and `my_identity`. JSON-RPC 2.0, no new
+  dependency.
+- Added: `mcp --print-config`, which emits the client config block with this
+  binary's absolute path, so wiring an agent needs no editing.
+- Added: `call_peer` is limited to an allowlist (`/v1/ping`, `/v1/identity`,
+  `/v1/peers`), extended per path with `--allow`. A model with a valid signature
+  on every reachable machine is not a sensible default.
+- Added: `neighbourd up` — announce, serve and open a pairing window in one
+  command, instead of remembering `serve --pair`.
+- Added: `neighbourd pair` with no arguments discovers the nodes on the network,
+  shows a numbered list, and prompts for the code. Typing an address from another
+  screen was the step where setup stopped being convenient.
+- Changed: tool failures return `isError` with text, not protocol errors, so the
+  model can read the reason and act on it.
+- Changed: software version 0.3.0, protocol still `neighbourd/0.2`. The wire
+  format did not change, and the protocol id tracks the wire, not the feature set.
+
 ## v0.2.0
 
 Pairing, and requests that need more than a token.
