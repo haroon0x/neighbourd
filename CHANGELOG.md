@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.4.0
+
+A peer can now reach a local service that stays on loopback. This is the release
+that gives the project a reason to exist.
+
+- Added: `neighbourd expose <host:port> --as NAME [--desc TEXT]`. Records a local
+  service — Ollama, a job runner, a vector store — so paired peers can reach it
+  through this node. The service is not rebound or restarted; nothing new listens
+  on the network.
+- Added: `GET /v1/resources`, authenticated, listing what this node offers. Kept
+  out of the public card on purpose: the names of a machine's services are not
+  advertising material.
+- Added: `/v1/proxy/<resource>/<path>`, authenticated, forwarding to the local
+  origin. Streaming, body capped at 8 MB, caller credentials stripped.
+- Added: `neighbourd call <peer> --resource NAME [path] [--method POST] [--body]`.
+- Added: MCP `peer_resources`, and `resource`/`method`/`body` arguments on
+  `call_peer`. A resource must be granted by name with `--allow resource:NAME`.
+- Security: the proxy dials loopback only, checked after resolution, so a paired
+  peer cannot use this node as a pivot. `--allow-remote` overrides it and is
+  never the default.
+- Fixed: `pair` printed `neighbourd status dcb1ad2f` and that command failed,
+  because short ids were not resolvable. Full id, unique id prefix, then name.
+- Fixed: the client had a blanket 10-second timeout, so the first real model call
+  through the proxy died with "context deadline exceeded". No overall timeout;
+  the caller's context is the deadline.
+
 ## v0.3.0
 
 An MCP server, and a setup that fits in three commands.

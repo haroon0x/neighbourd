@@ -190,10 +190,20 @@ func (s *Server) tools() []map[string]any {
 		},
 		{
 			"name":        "call_peer",
-			"description": "Make a signed request to a paired peer. Only allowlisted paths are reachable; /v1/ping confirms a live, authenticated peer.",
+			"description": "Make a signed request to a paired peer. Use 'path' for the peer's own endpoints (/v1/ping confirms a live, authenticated peer), or 'resource' to reach a local service that peer exposes (e.g. a model server). Both are allowlisted.",
 			"inputSchema": obj(map[string]any{
-				"id":   str("peer id"),
-				"path": str("path to request, must be allowlisted; defaults to /v1/ping"),
+				"id":       str("peer id"),
+				"path":     str("path to request when not using a resource; defaults to /v1/ping"),
+				"resource": str("name of an exposed resource on that peer, from peer_resources"),
+				"method":   str("HTTP method for a resource call; defaults to GET"),
+				"body":     str("JSON body for a resource call"),
+			}, "id"),
+		},
+		{
+			"name":        "peer_resources",
+			"description": "Ask a paired peer what local services it offers, e.g. a model server or a job runner. Returns names and descriptions.",
+			"inputSchema": obj(map[string]any{
+				"id": str("peer id"),
 			}, "id"),
 		},
 		{
@@ -236,12 +246,40 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 		return strings.TrimSpace(string(body)), nil
 	case "call_peer":
 		var a struct {
-			ID   string `json:"id"`
-			Path string `json:"path"`
+			ID       string `json:"id"`
+			Path     string `json:"path"`
+			Resource string `json:"resource"`
+			Method   string `json:"method"`
+			Body     string `json:"body"`
 		}
 		if err := json.Unmarshal(raw, &a); err != nil || a.ID == "" {
 			return "", fmt.Errorf("id is required")
 		}
+
+		// Resource calls are the interesting ones: a local service on the other
+		// machine, reached through its proxy. Allowed per name, never wholesale.
+		if a.Resource != "" {
+			if !s.allowedResource(a.Resource) {
+				return "", fmt.Errorf("resource %q is not allowlisted (start with: neighbourd mcp --allow resource:%s)", a.Resource, a.Resource)
+			}
+			peer, err := s.resolve(a.ID)
+			if err != nil {
+				return "", err
+			}
+			if peer.TokenToPeer == "" || peer.BaseURL == "" {
+				return "", fmt.Errorf("cannot call %s: not paired, or the stored address is stale", peer.Name)
+			}
+			var body []byte
+			if a.Body != "" {
+				body = []byte(a.Body)
+			}
+			out, err := client.New(s.opts.ID).CallResource(ctx, peer, peer.BaseURL, a.Resource, a.Path, a.Method, body, "application/json")
+			if err != nil {
+				return "", err
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+
 		path := a.Path
 		if path == "" {
 			path = proto.PathPing
@@ -264,6 +302,25 @@ func (s *Server) callTool(ctx context.Context, name string, raw json.RawMessage)
 			return "", err
 		}
 		return strings.TrimSpace(string(body)), nil
+	case "peer_resources":
+		var a struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &a); err != nil || a.ID == "" {
+			return "", fmt.Errorf("id is required")
+		}
+		peer, err := s.resolve(a.ID)
+		if err != nil {
+			return "", err
+		}
+		if peer.TokenToPeer == "" || peer.BaseURL == "" {
+			return "", fmt.Errorf("cannot ask %s: not paired, or the stored address is stale", peer.Name)
+		}
+		out, err := client.New(s.opts.ID).Get(ctx, peer, peer.BaseURL, proto.PathResources)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(out)), nil
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
@@ -308,19 +365,28 @@ func (s *Server) listPeers() (string, error) {
 }
 
 func (s *Server) resolve(ref string) (trust.Peer, error) {
-	if p, ok := s.opts.Trust.Get(ref); ok {
-		return p, nil
-	}
-	// A name is accepted for convenience, but ambiguity is refused rather than
-	// guessed: calling the wrong machine with a valid signature is worse than
-	// an error message.
-	return s.opts.Trust.ByName(ref)
+	// Full id, unique id prefix, or unambiguous name. Ambiguity is refused
+	// rather than guessed: calling the wrong machine with a valid signature is
+	// worse than an error message.
+	return s.opts.Trust.Resolve(ref)
 }
 
 func (s *Server) allowed(path string) bool {
 	base, _, _ := strings.Cut(path, "?")
 	for _, a := range s.opts.Allow {
 		if a == base {
+			return true
+		}
+	}
+	return false
+}
+
+// allowedResource reports whether a peer's exposed service may be called. The
+// allowlist entry form is "resource:<name>", so granting one service does not
+// grant the rest.
+func (s *Server) allowedResource(name string) bool {
+	for _, a := range s.opts.Allow {
+		if a == "resource:"+name {
 			return true
 		}
 	}

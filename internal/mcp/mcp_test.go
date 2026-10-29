@@ -90,10 +90,10 @@ func TestToolsListIsWellFormed(t *testing.T) {
 	}
 
 	tools := responses(t, out)[0]["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 4 {
-		t.Fatalf("got %d tools, want 4", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("got %d tools, want 5", len(tools))
 	}
-	want := map[string]bool{"list_peers": false, "peer_card": false, "call_peer": false, "my_identity": false}
+	want := map[string]bool{"list_peers": false, "peer_card": false, "call_peer": false, "my_identity": false, "peer_resources": false}
 	for _, raw := range tools {
 		tool := raw.(map[string]any)
 		name, _ := tool["name"].(string)

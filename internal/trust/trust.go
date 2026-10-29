@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -163,6 +164,48 @@ func (s *Store) ByName(name string) (Peer, error) {
 	default:
 		return Peer{}, fmt.Errorf("%d paired peers named %q; use the id", len(matches), name)
 	}
+}
+
+// ByIDPrefix matches a peer by the start of its id, which is what the CLI prints.
+//
+// Every command in this project shows eight hex characters rather than the full
+// id, so `pair` telling you `neighbourd status dcb1ad2f` has to work. Eight hex
+// characters of a 128-bit id cannot collide by accident, and if two did, that is
+// an error rather than a guess.
+func (s *Store) ByIDPrefix(prefix string) (Peer, error) {
+	if prefix == "" {
+		return Peer{}, fmt.Errorf("empty id")
+	}
+	var matches []Peer
+	for _, p := range s.List() {
+		if strings.HasPrefix(p.ID, prefix) {
+			matches = append(matches, p)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Peer{}, fmt.Errorf("no paired peer with id starting %q", prefix)
+	case 1:
+		return matches[0], nil
+	default:
+		return Peer{}, fmt.Errorf("%d paired peers start with %q; use more characters", len(matches), prefix)
+	}
+}
+
+// Resolve accepts a full id, a unique id prefix, or an unambiguous name. This is
+// the order a person actually tries things in.
+func (s *Store) Resolve(ref string) (Peer, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return Peer{}, fmt.Errorf("no peer given")
+	}
+	if p, ok := s.Get(ref); ok {
+		return p, nil
+	}
+	if p, err := s.ByIDPrefix(ref); err == nil {
+		return p, nil
+	}
+	return s.ByName(ref)
 }
 
 // RememberOutbound records a peer we just paired with: the token they issued to

@@ -21,6 +21,28 @@ Discovery is public. Anything returning data needs a token and a signature.
 - the operator token is accepted only from a loopback source address
 - `identity.json` and `peers.json` are `0600`, written atomically
 
+## The proxy (v0.4)
+
+Exposing a local service adds an attack surface, and it is deliberate. What is
+enforced:
+
+- a request reaches an exposed origin only after the caller proves it holds a
+  pinned key and a valid token, exactly like every other protected endpoint
+- the method and the whole forwarded path are inside the signature, so a caller
+  cannot retarget a request to another resource or another path
+- the destination must be loopback, checked after DNS resolution, so a paired
+  peer cannot use this node as a pivot into the rest of the network
+- `Authorization`, `Cookie` and `X-Neighbourd-*` are stripped before forwarding,
+  so a peer cannot smuggle credentials into a local service that trusts loopback
+- bodies are capped at 8 MB, and path traversal is refused
+- the request is bounded by the caller's context; there is no unbounded work
+  started on behalf of a peer
+
+What it does not do: encrypt, rate limit, restrict paths within an origin, or log
+usage. A paired peer you have granted a resource can call every endpoint of that
+service as fast as it likes, including destructive ones. Grant narrowly, and
+revoke with `trust remove`.
+
 ## What it does not guarantee
 
 - **Pairing over an untrusted network.** The pairing code travels in plain HTTP.

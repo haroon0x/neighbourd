@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -29,9 +30,36 @@ type Client struct {
 	HTTP *http.Client
 }
 
+// CallResource makes a signed request through a peer's proxy to a local service
+// that peer exposes. method is "" for GET, and body may be nil.
+//
+// The method and the whole path sit inside the signature, so the far side knows
+// exactly which resource and which path it agreed to serve, and a caller cannot
+// retarget the request without invalidating it.
+func (c *Client) CallResource(ctx context.Context, peer trust.Peer, baseURL, resource, path, method string, body []byte, contentType string) ([]byte, error) {
+	if method == "" {
+		method = http.MethodGet
+	}
+	if path != "" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return c.do(ctx, peer, method, baseURL, proto.PathProxy+"/"+resource+path, body, contentType)
+}
+
 // New returns a client that signs as id.
 func New(id *identity.Identity) *Client {
-	return &Client{ID: id, HTTP: &http.Client{Timeout: 10 * time.Second}}
+	return &Client{ID: id, HTTP: &http.Client{
+		// No overall Timeout: a proxied call can be a model generating for
+		// minutes, and the caller's context is the real deadline. A blanket
+		// timeout here would cut long answers off mid-stream, which is exactly
+		// the failure this had on the first attempt.
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+			ResponseHeaderTimeout: 5 * time.Minute,
+			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConnsPerHost:   4,
+		},
+	}}
 }
 
 // Pair redeems a pairing code at baseURL and returns the peer record to store.
@@ -110,10 +138,10 @@ func (c *Client) Pair(ctx context.Context, baseURL, code string) (trust.Peer, er
 
 // Get makes a signed GET to a peer and returns the response body.
 func (c *Client) Get(ctx context.Context, peer trust.Peer, baseURL, target string) ([]byte, error) {
-	return c.do(ctx, peer, http.MethodGet, baseURL, target, nil)
+	return c.do(ctx, peer, http.MethodGet, baseURL, target, nil, "")
 }
 
-func (c *Client) do(ctx context.Context, peer trust.Peer, method, baseURL, target string, body []byte) ([]byte, error) {
+func (c *Client) do(ctx context.Context, peer trust.Peer, method, baseURL, target string, body []byte, contentType string) ([]byte, error) {
 	ts := fmt.Sprint(time.Now().Unix())
 	nonce, err := newNonce()
 	if err != nil {
@@ -129,18 +157,26 @@ func (c *Client) do(ctx context.Context, peer trust.Peer, method, baseURL, targe
 	if err != nil {
 		return nil, err
 	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	req.Header.Set("Authorization", "Bearer "+peer.TokenToPeer)
 	req.Header.Set(proto.HeaderID, c.ID.ID)
 	req.Header.Set(proto.HeaderTS, ts)
 	req.Header.Set(proto.HeaderNonce, nonce)
 	req.Header.Set(proto.HeaderSig, base64.StdEncoding.EncodeToString(sig))
 
-	resp, err := c.HTTP.Do(req)
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Minute}
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("contact %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Generous: a proxied model response can be long.
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s replied %d: %s", url, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}

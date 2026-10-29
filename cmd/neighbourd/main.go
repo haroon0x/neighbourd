@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/haroon0x/neighbourd/internal/card"
 	"github.com/haroon0x/neighbourd/internal/client"
 	"github.com/haroon0x/neighbourd/internal/discovery"
+	"github.com/haroon0x/neighbourd/internal/expose"
 	"github.com/haroon0x/neighbourd/internal/identity"
 	"github.com/haroon0x/neighbourd/internal/mcp"
 	"github.com/haroon0x/neighbourd/internal/pair"
@@ -30,7 +32,7 @@ import (
 )
 
 const (
-	version     = "0.3.0"
+	version     = "0.4.0"
 	defaultPort = 7717
 )
 
@@ -52,6 +54,10 @@ func main() {
 		err = runPair(os.Args[2:])
 	case "mcp":
 		err = runMCP(os.Args[2:])
+	case "expose":
+		err = runExpose(os.Args[2:])
+	case "call":
+		err = runCall(os.Args[2:])
 	case "status":
 		err = runStatus(os.Args[2:])
 	case "trust":
@@ -83,6 +89,13 @@ func usage() {
       MCP server on stdio, so an agent can call paired peers as tools.
       --print-config writes the client config block pointing at this binary.
 
+  neighbourd expose [<host:port>] [--as NAME] [--desc TEXT]
+      Offer a local service to paired peers. The service stays on loopback; peers
+      reach it through here, signed. No arguments lists what is exposed.
+
+  neighbourd call <id|name> [--resource NAME] [/path] [--method POST] [--body JSON]
+      Make a signed request: a peer's own endpoint, or a service it exposes.
+
   neighbourd pair [<host:port>] [--code CODE]
       With no arguments, list the machines on the network and pair interactively.
 
@@ -113,6 +126,7 @@ func runServe(args []string) error {
 	noMDNS := fs.Bool("no-mdns", false, "serve HTTP but do not announce on the network")
 	hideToken := fs.Bool("hide-token", false, "do not print the operator token at startup")
 	openPairing := fs.Bool("pair", false, "open a pairing window at startup")
+	allowRemote := fs.Bool("allow-remote", false, "allow exposed origins that are not loopback (turns this node into a pivot; you probably do not want this)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -157,10 +171,12 @@ func runServe(args []string) error {
 	}
 
 	srv := server.New(server.Options{
-		Card:  c,
-		Self:  id,
-		Trust: peers,
-		Pair:  window,
+		Card:             c,
+		Self:             id,
+		Trust:            peers,
+		Pair:             window,
+		Expose:           openExposures(),
+		ProxyAllowRemote: *allowRemote,
 		Browse: func(wait time.Duration) []discovery.Peer {
 			ctx, cancel := context.WithTimeout(context.Background(), wait+time.Second)
 			defer cancel()
@@ -407,6 +423,183 @@ func atoi(s string) int {
 		n = n*10 + int(r-'0')
 	}
 	return n
+}
+
+// openExposures opens the store for serving. A broken file means the node
+// serves nothing rather than refusing to start: an unreadable exposures list is
+// not a reason to take the network down.
+func openExposures() *expose.Store {
+	dir, err := identity.Dir()
+	if err != nil {
+		return nil
+	}
+	s, err := expose.Open(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "neighbourd: exposures unreadable, serving none: %v\n", err)
+		return nil
+	}
+	return s
+}
+
+func runExpose(args []string) error {
+	fs := flag.NewFlagSet("expose", flag.ExitOnError)
+	as := fs.String("as", "", "name peers use to call it, e.g. ollama")
+	desc := fs.String("desc", "", "one line describing what it is, shown to peers")
+	allowRemote := fs.Bool("allow-remote", false, "allow an origin that is not loopback")
+	if err := parseInterspersed(fs, args, "as", "desc"); err != nil {
+		return err
+	}
+
+	fsDir, err := identity.Dir()
+	if err != nil {
+		return err
+	}
+	store, err := expose.Open(fsDir)
+	if err != nil {
+		return err
+	}
+
+	// Listing, and removing.
+	if fs.NArg() == 0 || fs.Arg(0) == "list" {
+		targets := store.List()
+		if len(targets) == 0 {
+			fmt.Println("nothing exposed.")
+			fmt.Println("\nexpose a local service so paired peers can reach it:")
+			fmt.Println("  neighbourd expose 127.0.0.1:11434 --as ollama --desc \"local models\"")
+			return nil
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "NAME\tORIGIN\tDESCRIPTION")
+		for _, t := range targets {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", t.Name, t.Origin, t.Description)
+		}
+		w.Flush()
+		return nil
+	}
+	if fs.Arg(0) == "remove" || fs.Arg(0) == "rm" {
+		if fs.NArg() < 2 {
+			return errors.New("usage: neighbourd expose remove <name>")
+		}
+		ok, err := store.Remove(fs.Arg(1))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("nothing exposed as %q", fs.Arg(1))
+		}
+		fmt.Printf("stopped exposing %s\n", fs.Arg(1))
+		return nil
+	}
+
+	origin := expose.NormalizeOrigin(fs.Arg(0))
+	if origin == "" {
+		return errors.New("usage: neighbourd expose <host:port|url> --as NAME [--desc TEXT]")
+	}
+	name := *as
+	if name == "" {
+		// Default the name to the port, which is usually the memorable part.
+		u, _ := url.Parse(origin)
+		_, port, _ := net.SplitHostPort(u.Host)
+		if port == "" {
+			return errors.New("--as is required (a name peers will call)")
+		}
+		name = "port-" + port
+	}
+
+	t := expose.Target{Name: name, Origin: origin, Description: *desc}
+	if err := expose.Validate(t, *allowRemote); err != nil {
+		return err
+	}
+	if err := store.Add(t); err != nil {
+		return err
+	}
+
+	me, _ := identity.LoadOrCreate("")
+	fmt.Printf("exposing %s -> %s\n", name, origin)
+	if !endpointAnswers(origin) {
+		fmt.Printf("  warning this origin did not answer a GET just now; check the service is running\n")
+	}
+	fmt.Printf("  store   %s\n", store.Path())
+	fmt.Printf("  running daemon picks this up without a restart\n")
+	if me != nil {
+		fmt.Printf("  a peer calls it with: neighbourd call %s --resource %s /api/tags\n", shortID(me.ID), name)
+	}
+	return nil
+}
+
+// endpointAnswers is a courtesy check so a typo in the port is caught at the
+// moment the operator types it, not when a peer's agent fails an hour later.
+func endpointAnswers(origin string) bool {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get(origin + "/")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
+}
+
+func runCall(args []string) error {
+	fs := flag.NewFlagSet("call", flag.ExitOnError)
+	resource := fs.String("resource", "", "exposed resource on the peer, e.g. ollama")
+	method := fs.String("method", "", "HTTP method (default GET)")
+	body := fs.String("body", "", "request body for POST/PUT")
+	contentType := fs.String("content-type", "application/json", "content type for the body")
+	if err := parseInterspersed(fs, args, "resource", "method", "body", "content-type"); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return errors.New("usage: neighbourd call <id|name> --resource NAME [/path] [--method POST] [--body JSON]")
+	}
+	path := "/"
+	if fs.NArg() > 1 {
+		path = fs.Arg(1)
+	}
+
+	me, err := identity.LoadOrCreate("")
+	if err != nil {
+		return err
+	}
+	dir, err := identity.Dir()
+	if err != nil {
+		return err
+	}
+	peers, err := trust.Open(dir)
+	if err != nil {
+		return err
+	}
+	peer, err := resolvePeer(peers, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if peer.BaseURL == "" {
+		return fmt.Errorf("%s has no recorded address; pair again with a host:port", peer.Name)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	var payload []byte
+	if *body != "" {
+		payload = []byte(*body)
+	}
+
+	if *resource == "" {
+		// No resource: a plain signed request to the peer's own endpoints.
+		out, err := client.New(me).Get(ctx, peer, peer.BaseURL, path)
+		if err != nil {
+			return err
+		}
+		fmt.Println(strings.TrimSpace(string(out)))
+		return nil
+	}
+
+	out, err := client.New(me).CallResource(ctx, peer, peer.BaseURL, *resource, path, *method, payload, *contentType)
+	if err != nil {
+		return err
+	}
+	fmt.Println(strings.TrimSpace(string(out)))
+	return nil
 }
 
 func runMCP(args []string) error {
@@ -699,10 +892,7 @@ func normalizeURL(target string) (string, error) {
 }
 
 func resolvePeer(peers *trust.Store, ref string) (trust.Peer, error) {
-	if p, ok := peers.Get(ref); ok {
-		return p, nil
-	}
-	return peers.ByName(ref)
+	return peers.Resolve(ref)
 }
 
 func yesNo(b bool) string {

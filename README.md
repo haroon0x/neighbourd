@@ -80,20 +80,49 @@ Paste that into your client's MCP config and restart it. The path is this exact
 binary, so there is nothing to edit. See [docs/MCP.md](docs/MCP.md) for what the
 tools do.
 
+## Calls, not just introductions
+
+`ping` between two nodes is a demo. The point is reaching a service that only
+exists on one machine:
+
+```sh
+# on the desktop, where Ollama listens on 127.0.0.1:11434 and nowhere else
+$ ./neighbourd expose 11434 --as ollama --desc "local model server"
+exposing ollama -> http://127.0.0.1:11434
+
+# on the laptop
+$ ./neighbourd call dcb1ad2f --resource ollama /api/tags
+{"models":[{"name":"qwen2.5:0.5b",...}]}
+
+$ ./neighbourd call dcb1ad2f --resource ollama /api/generate --method POST \
+    --body '{"model":"qwen2.5:0.5b","prompt":"hello","stream":false}'
+{"model":"qwen2.5:0.5b","response":"Hello! How can I help you today?"}
+```
+
+Ollama stays bound to loopback. Nothing new listens on the network. The request
+is signed, and the method and full path are inside the signature, so a caller
+cannot retarget it. Responses stream, so a model's answer arrives token by token
+instead of after the last one.
+
+[docs/EXPOSE.md](docs/EXPOSE.md) covers the rules: loopback-only targets checked
+after DNS, caller credentials stripped, traversal refused, no pivot.
+
 ## The MCP tools
 
-| tool          | what it does                                                        |
-|---------------|---------------------------------------------------------------------|
-| `list_peers`  | who is on this network and which of them you can call               |
-| `peer_card`   | fetch a peer's agent card (public, unverified)                       |
-| `call_peer`   | make a signed request to a paired peer, allowlisted paths only       |
-| `my_identity` | this machine's id and name, which the other side needs to pair      |
+| tool             | what it does                                                     |
+|------------------|------------------------------------------------------------------|
+| `list_peers`     | who is on this network and which of them you can call            |
+| `peer_card`      | fetch a peer's agent card (public, unverified)                    |
+| `peer_resources` | ask a peer what local services it offers                          |
+| `call_peer`      | signed request to a peer: its own endpoint, or a service it exposes |
+| `my_identity`    | this machine's id and name, which the other side needs to pair   |
 
-`call_peer` accepts `/v1/ping`, `/v1/identity` and `/v1/peers` by default.
-Anything else needs `--allow /path` when starting `neighbourd mcp`: an agent with
-a valid signature on every machine it can reach is not a default worth shipping.
+`call_peer` accepts `/v1/ping`, `/v1/identity` and `/v1/peers` by default, and
+`--allow resource:<name>` for each exposed service. Anything else needs
+`--allow /path`: an agent with a valid signature on every machine it can reach is
+not a default worth shipping.
 
-## What works today (v0.3)
+## What works today (v0.4)
 
 - persistent identity per machine: Ed25519 keypair, id = first 16 bytes of the
   key's sha256, in `~/.config/neighbourd/identity.json`
@@ -103,6 +132,9 @@ a valid signature on every machine it can reach is not a default worth shipping.
 - per-peer tokens plus Ed25519 request signatures, nonce replay protection,
   clock skew rejection that names the offset
 - MCP server over stdio: peers as tools, no new dependency
+- `expose` a loopback service to paired peers, and `call` it from the other
+  machine; the service stays on loopback and the caller's credentials are not
+  forwarded
 - `trust list` / `trust remove`, revocation in both directions
 
 Not built yet: A2A message transport, TLS, file transfer. See

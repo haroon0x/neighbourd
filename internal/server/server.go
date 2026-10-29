@@ -11,13 +11,16 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/haroon0x/neighbourd/internal/card"
 	"github.com/haroon0x/neighbourd/internal/discovery"
+	"github.com/haroon0x/neighbourd/internal/expose"
 	"github.com/haroon0x/neighbourd/internal/identity"
 	"github.com/haroon0x/neighbourd/internal/pair"
 	"github.com/haroon0x/neighbourd/internal/proto"
+	"github.com/haroon0x/neighbourd/internal/proxy"
 	"github.com/haroon0x/neighbourd/internal/trust"
 )
 
@@ -33,6 +36,14 @@ type Options struct {
 
 	// Browse scans the network for /v1/peers. Injected so tests need no mDNS.
 	Browse func(wait time.Duration) []discovery.Peer
+
+	// Expose lists local services offered to paired peers. Nil means the node
+	// offers nothing and both the listing and the proxy answer 404.
+	Expose *expose.Store
+
+	// ProxyAllowRemote lets an exposed origin live off-box. Only ever set from
+	// an explicit operator flag; the default keeps this node from being a pivot.
+	ProxyAllowRemote bool
 
 	Log *log.Logger
 }
@@ -110,12 +121,72 @@ func New(opts Options) *http.Server {
 		writeJSON(w, http.StatusOK, map[string]any{"network": network, "paired": paired})
 	}))
 
+	// What this node offers. Authenticated: the names of a machine's local
+	// services are not public information, and the card is world-readable on the
+	// LAN. A peer learns these after pairing, which is when it has earned them.
+	mux.HandleFunc("GET "+proto.PathResources, authed(a, func(w http.ResponseWriter, r *http.Request, _ who) {
+		resources := []map[string]any{}
+		if opts.Expose != nil {
+			for _, t := range opts.Expose.List() {
+				entry := map[string]any{"name": t.Name}
+				if t.Description != "" {
+					entry["description"] = t.Description
+				}
+				resources = append(resources, entry)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":        opts.Card.ID,
+			"name":      opts.Card.Name,
+			"resources": resources,
+		})
+	}))
+
+	// Forwarding. The path is part of the signed canonical form, so a caller
+	// cannot swap the resource or the target path without invalidating the
+	// signature. Any method is allowed because local APIs are not all GETs.
+	mux.HandleFunc(proto.PathProxy+"/", authed(a, func(w http.ResponseWriter, r *http.Request, _ who) {
+		if opts.Expose == nil {
+			writeError(w, http.StatusNotFound, "this node exposes nothing")
+			return
+		}
+		rest := strings.TrimPrefix(r.URL.Path, proto.PathProxy+"/")
+		name, tail, _ := strings.Cut(rest, "/")
+		target, ok := opts.Expose.Get(name)
+		if !ok {
+			writeError(w, http.StatusNotFound, "no exposed resource named %q", name)
+			return
+		}
+		if escapesOrigin(tail) {
+			writeError(w, http.StatusBadRequest, "path may not contain '..' segments")
+			return
+		}
+		if opts.Log != nil {
+			opts.Log.Printf("proxy %s -> %s/%s", name, target.Origin, tail)
+		}
+		h := &proxy.Handler{Origin: target.Origin, AllowRemote: opts.ProxyAllowRemote}
+		h.Serve(w, r, tail)
+	}))
+
 	return &http.Server{
 		Handler:           logRequests(opts.Log, mux),
 		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// No WriteTimeout on purpose: a proxied request can stream a model's
+		// output for minutes, and a deadline here would cut it off mid-sentence.
+		IdleTimeout: 60 * time.Second,
 	}
+}
+
+// escapesOrigin rejects path traversal before the request reaches a local
+// service. The dial guard already pins the destination, so this is defence in
+// depth rather than the only barrier.
+func escapesOrigin(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // handlePair registers a requester as a peer.

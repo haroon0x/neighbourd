@@ -53,12 +53,21 @@ seconds, including nodes you have never paired with. A node that appears in
 returns it as text. The card is a claim the peer makes about itself; nothing in
 it is verified, which is why the tool description says so.
 
+### `peer_resources`
+
+`{"id": "<peer id>"}`. Asks the peer what local services it offers:
+
+```json
+{"id":"dcb1ad2f...","name":"desktop","resources":[{"name":"ollama","description":"local model server"}]}
+```
+
 ### `call_peer`
 
-`{"id": "<peer id>", "path": "/v1/ping"}`. Makes a signed request and returns the
-response body.
+`{"id": "<peer id>", "path": "/v1/ping"}` for the peer's own endpoints, or
+`{"id": "...", "resource": "ollama", "path": "/api/tags", "method": "POST", "body": "{...}"}`
+to reach a service the peer exposes. Returns the response body as text.
 
-Allowlisted paths, and nothing else:
+Own endpoints, allowlisted by default:
 
 | path           | returns                                    |
 |----------------|--------------------------------------------|
@@ -68,6 +77,15 @@ Allowlisted paths, and nothing else:
 
 Extend with `--allow /v1/whatever` when starting the server, repeated per path.
 Query strings are allowed if the base path is allowlisted; traversal is not.
+
+Exposed resources are granted by name, never in bulk:
+
+```sh
+neighbourd mcp --allow resource:ollama
+```
+
+Without it, `call_peer` with `resource` returns an error naming the exact flag.
+Granting `ollama` says nothing about any other service the peer offers.
 
 Every call is signed with this machine's key, so the far side sees the request as
 coming from a paired peer or refuses it.

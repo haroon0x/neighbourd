@@ -26,6 +26,8 @@ const (
 	PathPing        = "/v1/ping"
 	PathPeers       = "/v1/peers"
 	PathIdentity    = "/v1/identity"
+	PathResources   = "/v1/resources"
+	PathProxy       = "/v1/proxy"
 )
 
 // Headers.

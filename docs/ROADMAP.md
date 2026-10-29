@@ -34,7 +34,17 @@ Ordered by what unblocks the next thing, not by what is fun to write.
 - [x] per-path allowlist for `call_peer`, defaults to the three read endpoints
 - [x] `up` and interactive `pair` so setup is three commands, not five
 
-## v0.4 — A2A conformance and TLS
+## v0.4 — expose and proxy (done)
+
+- [x] `neighbourd expose <host:port> --as NAME` records a loopback service
+- [x] `GET /v1/resources` lists what a node offers, authenticated
+- [x] `/v1/proxy/<resource>/<path>` forwards signed requests, streaming
+- [x] `neighbourd call <peer> --resource NAME` from the other machine
+- [x] MCP: `peer_resources`, and `resource` on `call_peer`, allowlisted by name
+- [x] dial guard: loopback only, verified after resolution, no pivot
+- [x] caller credentials and protocol headers stripped before forwarding
+
+## v0.5 — A2A conformance and TLS
 
 - [ ] speak A2A for agent-to-agent messages instead of a private envelope
 - [ ] align the card with the A2A schema where it overlaps
