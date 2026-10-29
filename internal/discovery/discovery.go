@@ -16,14 +16,16 @@ import (
 	"time"
 
 	"github.com/hashicorp/mdns"
+
+	"github.com/haroon0x/neighbourd/internal/proto"
 )
 
-// ServiceType is the mDNS service a veranda node registers.
-const ServiceType = "_veranda._tcp"
+// ServiceType is the mDNS service a neighbourd node registers.
+const ServiceType = "_neighbourd._tcp"
 
-// protoID mirrors card.Protocol. Duplicated rather than imported so discovery
-// stays independent of the card package's evolution.
-const protoID = "veranda/0.1"
+// protoID mirrors the wire protocol. Duplicated rather than imported so
+// discovery stays independent of the card package's evolution.
+const protoID = proto.Protocol
 
 // Peer is one discovered node, as far as discovery can honestly describe it.
 // Nothing here is authenticated: name and id are claims read off the wire.
@@ -54,7 +56,7 @@ func TXT(id, name, version string) []string {
 	}
 }
 
-// Advertise registers instance under _veranda._tcp and starts answering
+// Advertise registers instance under _neighbourd._tcp and starts answering
 // queries. hostName may be empty to let the OS hostname be used; it should be
 // the mDNS name, so callers normally want "<hostname>.local.".
 //
@@ -180,7 +182,7 @@ func peerFromEntry(e *mdns.ServiceEntry) Peer {
 	return p
 }
 
-// instanceName trims "laptop._veranda._tcp.local." down to "laptop".
+// instanceName trims "laptop._neighbourd._tcp.local." down to "laptop".
 func instanceName(s string) string {
 	if i := strings.IndexByte(s, '.'); i > 0 {
 		return s[:i]

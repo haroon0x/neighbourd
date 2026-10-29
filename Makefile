@@ -1,10 +1,10 @@
-BINARY := veranda
+BINARY := neighbourd
 VERSION := 0.1.0
 
 .PHONY: build test vet fmt check clean
 
 build:
-	go build -trimpath -ldflags "-s -w" -o $(BINARY) ./cmd/veranda
+	go build -trimpath -ldflags "-s -w" -o $(BINARY) ./cmd/neighbourd
 
 test:
 	go test ./...

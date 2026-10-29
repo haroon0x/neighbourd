@@ -63,7 +63,7 @@ func TestIdentityFileIsPrivate(t *testing.T) {
 		t.Fatalf("LoadOrCreate: %v", err)
 	}
 
-	path := filepath.Join(dir, "veranda", "identity.json")
+	path := filepath.Join(dir, "neighbourd", "identity.json")
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat identity: %v", err)

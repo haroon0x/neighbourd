@@ -1,10 +1,8 @@
-// Package identity holds the long-lived state for one veranda node: an Ed25519
-// keypair, the id derived from it, and the device token peers must present.
+// Package identity holds the long-lived state for one neighbourd node: an Ed25519
+// keypair, the id derived from it, and the device token the operator uses.
 //
-// The keypair is generated in v0.1 but not yet used for signing. It exists so
-// the id is derived from something that can later carry a signature — changing
-// the id derivation after peers have pinned each other would be a breaking
-// change, so it is fixed now.
+// From v0.2 the keypair does real work: every request a paired peer makes is
+// signed with it, so a stolen token is not enough to impersonate anyone.
 package identity
 
 import (
@@ -22,8 +20,8 @@ import (
 	"time"
 )
 
-// Identity is the on-disk state of a node. It is written 0600 and should be
-// treated as a secret: the token in it is the whole of v0.1's authorisation.
+// Identity is the on-disk state of a node. It is written 0600 and is a secret:
+// the seed in it signs every request this machine makes.
 type Identity struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
@@ -33,27 +31,83 @@ type Identity struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// Dir returns the directory holding veranda state, without creating it.
+// Dir returns the directory holding neighbourd state, without creating it.
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("locate config dir: %w", err)
 	}
-	return filepath.Join(base, "veranda"), nil
+	return filepath.Join(base, "neighbourd"), nil
 }
 
 // ShortID is the first 8 characters of the id, for display only. Never use it
 // to identify a peer programmatically.
-func (i *Identity) ShortID() string {
-	if len(i.ID) < 8 {
-		return i.ID
+func (i *Identity) ShortID() string { return shortID(i.ID) }
+
+func shortID(id string) string {
+	if len(id) < 8 {
+		return id
 	}
-	return i.ID[:8]
+	return id[:8]
 }
 
 // PublicKeyBytes returns the decoded public key.
 func (i *Identity) PublicKeyBytes() (ed25519.PublicKey, error) {
-	b, err := base64.StdEncoding.DecodeString(i.PublicKey)
+	return decodePublic(i.PublicKey)
+}
+
+// SigningKey returns the Ed25519 key derived from the stored seed. The field
+// holding the seed is called PrivateKey, so this method cannot share the name.
+func (i *Identity) SigningKey() (ed25519.PrivateKey, error) {
+	seed, err := base64.StdEncoding.DecodeString(i.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode private key: %w", err)
+	}
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("private seed is %d bytes, want %d", len(seed), ed25519.SeedSize)
+	}
+	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+// Sign signs msg with this node's key.
+func (i *Identity) Sign(msg []byte) ([]byte, error) {
+	priv, err := i.SigningKey()
+	if err != nil {
+		return nil, err
+	}
+	return ed25519.Sign(priv, msg), nil
+}
+
+// IDFromPublicKey derives the node id from a public key. The mapping is one way
+// and fixed: peers pin ids, so changing it would break every pairing.
+func IDFromPublicKey(pub ed25519.PublicKey) string {
+	sum := sha256.Sum256(pub)
+	return hex.EncodeToString(sum[:16])
+}
+
+// IDFromPublicKeyB64 is IDFromPublicKey for the base64 form used on the wire.
+func IDFromPublicKeyB64(s string) (string, error) {
+	pub, err := decodePublic(s)
+	if err != nil {
+		return "", err
+	}
+	return IDFromPublicKey(pub), nil
+}
+
+// Verify checks sig over msg against a base64 public key.
+func Verify(pubB64 string, msg, sig []byte) error {
+	pub, err := decodePublic(pubB64)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(pub, msg, sig) {
+		return errors.New("signature does not verify")
+	}
+	return nil
+}
+
+func decodePublic(s string) (ed25519.PublicKey, error) {
+	b, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
 		return nil, fmt.Errorf("decode public key: %w", err)
 	}
@@ -111,20 +165,19 @@ func generate(name string) (*Identity, error) {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
 
-	// 32 bytes of entropy, hex encoded. Not a password: it never leaves the
-	// machine except when the operator copies it to a peer on purpose.
+	// 32 bytes of entropy, hex encoded. Never leaves the machine except when
+	// the operator copies it on purpose.
 	tok := make([]byte, 32)
 	if _, err := rand.Read(tok); err != nil {
 		return nil, fmt.Errorf("generate token: %w", err)
 	}
 
-	sum := sha256.Sum256(pub)
 	if name == "" {
 		name, _ = os.Hostname()
 	}
 
 	return &Identity{
-		ID:         hex.EncodeToString(sum[:16]),
+		ID:         IDFromPublicKey(pub),
 		Name:       name,
 		PublicKey:  base64.StdEncoding.EncodeToString(pub),
 		PrivateKey: base64.StdEncoding.EncodeToString(priv.Seed()),

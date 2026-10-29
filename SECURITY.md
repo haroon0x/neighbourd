@@ -2,37 +2,59 @@
 
 ## Scope
 
-veranda runs on a network you control and assumes the neighbours are not
-friendly. Discovery is public. Anything that returns data needs a token.
+Runs on a network you control, assumes the neighbours are not friendly.
+Discovery is public. Anything returning data needs a token and a signature.
 
-## What v0.1 actually guarantees
+## What v0.2 guarantees
 
-- the announcement is public, and is meant to be: any device on the LAN can see
-  the name, id and version of every veranda node
-- `/v1/*` returns nothing without a bearer token; the comparison is constant
-  time
-- the token and private key are stored `0600` in `~/.config/veranda/`
+- the announcement is public by design: any device on the LAN can see the name,
+  id and version of every node
+- `/v1/*` requires `Authorization: Bearer <token>` **and** an Ed25519 signature
+  from a key pinned at pairing time
+- a request cannot be replayed: nonces are recorded, timestamps outside a five
+  minute window are refused
+- a pairing request must be signed with the key it registers, and its id must
+  derive from that key, so an id cannot be claimed for a key the caller does not
+  hold
+- pairing codes are single use, 8 characters from a 31 symbol alphabet, and
+  expire after five minutes
+- the operator token is accepted only from a loopback source address
+- `identity.json` and `peers.json` are `0600`, written atomically
 
-That is all. It is not authentication of identity.
+## What it does not guarantee
 
-## Known weaknesses
+- **Pairing over an untrusted network.** The pairing code travels in plain HTTP.
+  Anyone already on the network and watching at that moment can read it and race
+  you. Pair on a network you trust, and pair rarely.
+- **Confidentiality of traffic.** Bodies are signed, not encrypted. Anyone on the
+  LAN can read the JSON in flight. TLS with pinning is a v0.4 item.
+- **Availability.** Anything on the LAN can flood or impersonate a node. There is
+  no rate limiting.
+- **A compromised host.** If the machine itself is owned, its keys and tokens are
+  owned.
 
-- No pairing yet. A token is just a shared secret; whoever holds it is trusted.
-- Plain HTTP. An active attacker on the LAN can read and modify traffic between
-  two peers, including the token.
-- mDNS is unauthenticated. Anyone can announce any id or name.
-- No rate limiting. Anything on the LAN can flood a node.
+## Known weaknesses worth naming
+
+- mDNS is unauthenticated: an attacker can announce a name that looks like a peer
+  you already have. Nothing prevents a confusing duplicate; the id in the TXT
+  record is what you should compare, and `trust list` is the authority.
+- Two processes writing `peers.json` at the exact same moment: last writer wins.
+  The failure mode is a lost pairing, not a lost check.
+- No certificate story yet, so there is no defence against an active
+  man-in-the-middle *after* pairing either. Signatures stop impersonation and
+  replay; they do not stop interception.
 
 ## Please never
 
 - port-forward it
 - bind it to a globally routable IPv6 address without a firewall rule in front
-- put it on a network with devices you do not trust, expecting the token to save
-  you
+- pair over public Wi-Fi and assume the code was not seen
+- treat a card, a name or an mDNS announcement as evidence of identity
 
 ## Reporting
 
-Open an issue for anything that fits the weaknesses above — they are known and
-documented, not surprises. For something that breaks the token check, escapes
-the bind address, or leaks state outside `~/.config/veranda/`, mail the address
-on the GitHub profile instead of filing publicly.
+Open an issue for anything that fits the list above — those are known and
+documented, not surprises. For something that defeats the signature check,
+escapes the loopback restriction on the operator token, or leaks state outside
+`~/.config/neighbourd/`, mail the address on the GitHub profile instead of filing
+publicly.

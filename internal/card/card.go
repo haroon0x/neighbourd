@@ -1,15 +1,17 @@
 // Package card defines the document a node publishes at its well-known path.
 //
 // The shape follows A2A's agent card closely enough that an A2A client can pick
-// out name, description and url, while veranda's own fields stay nested so the
+// out name, description and url, while neighbourd's own fields stay nested so the
 // two can drift without breaking each other.
 //
 // A card is a claim about yourself. Nothing in it is verified by anyone. Do not
 // treat a peer's card as a statement of fact.
 package card
 
-// Protocol is the veranda wire protocol this build speaks.
-const Protocol = "veranda/0.1"
+import "github.com/haroon0x/neighbourd/internal/proto"
+
+// Protocol is the wire protocol this build speaks.
+const Protocol = proto.Protocol
 
 // Endpoints are the paths a peer will find on this node. Relative by design:
 // the host and port come from discovery, not from the card, because DHCP moves
@@ -47,7 +49,7 @@ func New(id, name, version, host string, port int) Card {
 		Name:          name,
 		ID:            id,
 		Version:       version,
-		Description:   "veranda node: discoverable on the local network",
+		Description:   "neighbourd node: discoverable on the local network",
 		Endpoints: Endpoints{
 			Card:   "/.well-known/agent-card.json",
 			Health: "/healthz",

@@ -1,4 +1,4 @@
-module github.com/haroon0x/veranda
+module github.com/haroon0x/neighbourd
 
 go 1.25.4
 

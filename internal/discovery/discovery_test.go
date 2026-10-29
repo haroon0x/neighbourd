@@ -5,13 +5,15 @@ import (
 	"testing"
 
 	"github.com/hashicorp/mdns"
+
+	"github.com/haroon0x/neighbourd/internal/proto"
 )
 
 func TestInstanceNameTrimsServiceSuffix(t *testing.T) {
 	cases := map[string]string{
-		"laptop._veranda._tcp.local.": "laptop",
-		"laptop":                      "laptop",
-		"":                            "",
+		"laptop._neighbourd._tcp.local.": "laptop",
+		"laptop":                         "laptop",
+		"":                               "",
 	}
 	for in, want := range cases {
 		if got := instanceName(in); got != want {
@@ -22,11 +24,11 @@ func TestInstanceNameTrimsServiceSuffix(t *testing.T) {
 
 func TestPeerFromEntryReadsTXT(t *testing.T) {
 	e := &mdns.ServiceEntry{
-		Name:       "laptop._veranda._tcp.local.",
+		Name:       "laptop._neighbourd._tcp.local.",
 		Host:       "g.local.",
 		Port:       7717,
 		AddrV4:     net.IPv4(192, 168, 29, 93),
-		InfoFields: []string{"v=0.1.0", "id=abc123", "name=laptop", "proto=veranda/0.1"},
+		InfoFields: []string{"v=0.1.0", "id=abc123", "name=laptop", "proto=neighbourd/0.1"},
 	}
 
 	p := peerFromEntry(e)
@@ -48,7 +50,7 @@ func TestPeerFromEntryReadsTXT(t *testing.T) {
 }
 
 func TestPeerFromEntryToleratesMissingTXT(t *testing.T) {
-	p := peerFromEntry(&mdns.ServiceEntry{Name: "bare._veranda._tcp.local."})
+	p := peerFromEntry(&mdns.ServiceEntry{Name: "bare._neighbourd._tcp.local."})
 	if p.Name != "bare" || p.ID != "" {
 		t.Errorf("unexpected peer: %+v", p)
 	}
@@ -56,7 +58,7 @@ func TestPeerFromEntryToleratesMissingTXT(t *testing.T) {
 
 func TestTXTFieldsAreNamespaced(t *testing.T) {
 	fields := TXT("id123", "laptop", "0.1.0")
-	want := map[string]string{"v": "0.1.0", "id": "id123", "name": "laptop", "proto": "veranda/0.1"}
+	want := map[string]string{"v": "0.1.0", "id": "id123", "name": "laptop", "proto": proto.Protocol}
 	for _, f := range fields {
 		var k, v string
 		for i := range f {

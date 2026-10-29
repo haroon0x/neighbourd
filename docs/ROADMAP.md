@@ -2,53 +2,52 @@
 
 Ordered by what unblocks the next thing, not by what is fun to write.
 
-## v0.1 — the skeleton (current)
+## v0.1 — the skeleton (done)
 
-- [x] persistent identity: Ed25519 keypair, stable id, device token
+- [x] persistent identity: Ed25519 keypair, stable id, operator token
 - [x] mDNS announce with TXT record
 - [x] mDNS browse, printed as a table
 - [x] agent card at `/.well-known/agent-card.json`
 - [x] bearer auth on `/v1/*`, constant-time compare
-- [x] `/v1/ping`, `/v1/peers`
-- [ ] resolve mDNS name to a dialable address in `peers` output
-- [ ] `--bind` validation that refuses a non-loopback v6 bind unless forced
+- [x] interface filtering, so Docker bridges are not announced
 
-## v0.2 — pairing
+## v0.2 — pairing and signed requests (done)
 
-- [ ] `veranda pair <id>` — request a token from a peer that is showing a
-      short-lived code; token bound to the requester's public key
-- [ ] signed cards: `sig` field over the card body, verified on browse, shown as
-      "unsigned" when absent
-- [ ] token rotation and revocation
-- [ ] `veranda trust` listing pinned peers
-
-The point of this version is that a rogue announcement cannot collect a token.
-Until it lands, treat every peer as unauthenticated.
+- [x] one-time pairing codes: 8 characters, single use, 5 minute window
+- [x] self-signed pairing request, so a key must be held to be pinned
+- [x] per-peer tokens, two credential slots per record
+- [x] Ed25519 signature over method, target, timestamp, nonce, body hash
+- [x] replay protection by nonce, with a fail-closed cache
+- [x] clock skew rejection that names the offset
+- [x] operator token limited to loopback
+- [x] `SIGHUP` opens a new pairing window without a restart
+- [x] `trust list` / `trust remove`, revocation in both directions
+- [x] store safe against two processes sharing one file
+- [x] golden tests for the canonical signing forms
 
 ## v0.3 — MCP adapter
 
-- [ ] `veranda mcp` — stdio MCP server exposing `list_peers`, `call_peer`,
-      `peer_card`
+- [ ] `neighbourd mcp` — stdio MCP server exposing `list_peers`, `peer_card`,
+      `call_peer`
 - [ ] peer selection by id, never by name
 - [ ] per-peer tool allowlist so a remote agent cannot call everything
 
-This is the version that makes veranda useful to an MCP client with no
-configuration step.
+This is the version that makes it useful to an MCP client with no configuration
+step, which is the whole point of the project.
 
-## v0.4 — A2A conformance
+## v0.4 — A2A conformance and TLS
 
 - [ ] speak A2A for agent-to-agent messages instead of a private envelope
 - [ ] align the card with the A2A schema where it overlaps
 - [ ] track LAD-A2A draft revisions; document deviations
-- [ ] `well-known` discovery endpoint for the LAD-A2A path
+- [ ] TLS with certificate pinning, using the keys already pinned at pairing
+- [ ] refresh `base_url` from discovery when a peer moves
 
 ## Later
 
 - blob transfer, delegated to LocalSend's REST API rather than reimplemented
-- TLS with certificate pinning, after pairing exists to make pinning meaningful
 - a read-only browser view for phones, since a phone will not run this
-- router-agnostic reachability across VLANs, only if it can avoid becoming a
-  tunnel
+- reachability across VLANs, only if it can avoid becoming a tunnel
 
 ## Explicitly not planned
 
